@@ -7,15 +7,16 @@
 # IDE, or install your dotfiles itself -- that's
 # naimor-dev-infra/bin/onboard.ps1, fetched below, not cloned.
 
-$ErrorActionPreference = "Stop"
-# PowerShell 7.4+ defaults $PSNativeCommandUseErrorActionPreference to $true,
-# which turns ANY native command's nonzero exit (and often its stderr output)
-# into a terminating error when $ErrorActionPreference = "Stop" -- even when
-# the exit code is being used deliberately as a signal (e.g. `gh auth status`
-# returning nonzero just means "not logged in yet"). Redirecting the stream
-# (*> $null) does not prevent this. Disabling it restores the behavior this
-# script's $LASTEXITCODE checks are written around.
-$PSNativeCommandUseErrorActionPreference = $false
+# Deliberately NOT $ErrorActionPreference = "Stop": under BOTH Windows
+# PowerShell 5.1 (the classic behavior, since v1) and PowerShell 7.4+
+# (via $PSNativeCommandUseErrorActionPreference, on by default), "Stop"
+# turns a native command's stderr output into a terminating error --
+# even when the exit code is a deliberate signal this script checks via
+# $LASTEXITCODE (e.g. `gh auth status` returning nonzero just means "not
+# logged in yet"). Redirecting the stream (*> $null) does not prevent
+# it. Leaving the default ("Continue") is what makes the $LASTEXITCODE
+# checks below actually reachable, on either PowerShell version.
+$PSNativeCommandUseErrorActionPreference = $false  # belt-and-suspenders on 7.4+; the real fix is not setting "Stop" above
 $Org = "NaimorInc"
 $Repo = "naimor-dev-infra"
 
