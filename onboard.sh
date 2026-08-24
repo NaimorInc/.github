@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # NaimorInc/.github onboard.sh — public phase, macOS/Linux/WSL2.
 #
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.sh)"
+#   bash <(curl -fsSL https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.sh)
 #
 # Job: get to an authenticated `gh` that can read naimor-dev-infra, then
 # hand off to the real installer there. Does NOT install your baseline
 # tools or dotfiles itself -- that's naimor-dev-infra/bin/onboard.sh,
 # fetched below, not cloned.
+#
+# NOT plain `curl | bash`: this script calls `read -r -p` (the account-switch
+# prompt below), and piping curl's output into bash leaves stdin attached to
+# that pipe instead of the real terminal, so `read` would hang or read
+# garbage. `bash <(...)` uses process substitution instead -- bash reads the
+# script from a separate fd, stdin stays the terminal, `read` keeps working.
+# (PowerShell's `irm | iex` doesn't have this problem: `iex` evaluates in the
+# *same* session rather than a stdin-piped subshell, so its interactive
+# prompts are unaffected either way.)
 set -euo pipefail
 
 ORG="NaimorInc"

@@ -9,7 +9,7 @@ Custom sheet-metal fabrication and precision CNC machining. [naimormetalfabricat
 **macOS or Linux:**
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.sh)"
+bash <(curl -fsSL https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.sh)
 ```
 
 **Windows** (PowerShell):
