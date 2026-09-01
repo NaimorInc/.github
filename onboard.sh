@@ -52,26 +52,42 @@ if ! command -v gh >/dev/null 2>&1; then
   fi
 fi
 
+# Hard gate: git and gh must actually be on PATH now. A failed install
+# above (a broken apt source, a declined Homebrew step) otherwise limps on
+# into `gh` calls that then fail for a different-looking reason.
+for tool in git gh; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' did not install. Fix the error above and re-run." >&2; exit 1; }
+done
+
 # 3. Authenticate
 if ! gh auth status >/dev/null 2>&1; then
   info "Not logged in to gh."
   gh auth login
 fi
 
+# Name the account we're acting as. A person may have more than one GitHub
+# account with NaimorInc access (personal + work); make the pick visible.
+WHO="$(gh api user --jq .login 2>/dev/null || true)"
+[ -n "$WHO" ] && info "Authenticated to GitHub as: $WHO"
+
 # 4. Confirm read access to naimor-dev-infra -- not just org membership.
 # Offer to switch accounts rather than fail silently.
-while ! gh api "repos/$ORG/$REPO" >/dev/null 2>&1; do
-  echo "This account cannot read $ORG/$REPO."
+while ! probe="$(gh api "repos/$ORG/$REPO" 2>&1)"; do
+  echo "Account '$WHO' cannot read $ORG/$REPO."
+  # Surface the real reason -- a SAML/SSO-unauthorized token and a genuine
+  # no-access both land here but the API error text differs.
+  printf '%s\n' "$probe" | head -n 3
   read -r -p "Log out and try a different account? [y/N] " ans
   if [[ "$ans" =~ ^[Yy]$ ]]; then
     gh auth logout
     gh auth login
+    WHO="$(gh api user --jq .login 2>/dev/null || true)"
   else
-    echo "Cancelled."
+    echo "Cancelled. Ask a NaimorInc owner to grant '$WHO' read access to $REPO, or sign in with an account that has it."
     exit 1
   fi
 done
-info "Confirmed read access to $ORG/$REPO."
+info "Confirmed read access to $ORG/$REPO as '$WHO'."
 
 # 5. Hand off to the real installer. Fetched, not cloned.
 info "Fetching the real installer from $ORG/$REPO"
