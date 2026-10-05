@@ -4,7 +4,7 @@ Custom sheet-metal fabrication and precision CNC machining. [naimormetalfabricat
 
 ---
 
-**Naimor team member?** Once you're added to this org, set up your workstation.
+**Naimor team member or contributor?** Once you have access (an org invite, or invitations to its repos), set up your workstation.
 
 **macOS or Linux:**
 
@@ -18,4 +18,4 @@ bash <(curl -fsSL https://raw.githubusercontent.com/NaimorInc/.github/refs/heads
 irm "https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.ps1" | iex
 ```
 
-Not yet a member? Ask your Naimor contact for an invite.
+No access yet? Ask your Naimor contact for an invite.
