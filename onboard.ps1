@@ -83,7 +83,9 @@ then re-run this onboarding command.
 gh auth status *> $null
 if ($LASTEXITCODE -ne 0) {
     Info "Not logged in to gh."
-    gh auth login
+    # -s project: day-to-day work edits an org Project board; the real installer
+    # adds the scope to an older login that lacks it.
+    gh auth login -s project
 }
 
 # Name the account we're about to act as. A person may have more than one
@@ -102,7 +104,7 @@ while ($true) {
     $ans = Read-Host "Log out and try a different account? [y/N]"
     if ($ans -match '^[Yy]') {
         gh auth logout
-        gh auth login
+        gh auth login -s project
         $who = (gh api user --jq .login 2>$null)
     } else {
         Write-Error "Cancelled. Ask a NaimorInc owner to grant '$who' read access to $Repo, or sign in with an account that has it."

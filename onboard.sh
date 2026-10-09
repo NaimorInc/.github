@@ -62,7 +62,9 @@ done
 # 3. Authenticate
 if ! gh auth status >/dev/null 2>&1; then
   info "Not logged in to gh."
-  gh auth login
+  # -s project: day-to-day work edits an org Project board; the real installer
+  # adds the scope to an older login that lacks it.
+  gh auth login -s project
 fi
 
 # Name the account we're acting as. A person may have more than one GitHub
@@ -80,7 +82,7 @@ while ! probe="$(gh api "repos/$ORG/$REPO" 2>&1)"; do
   read -r -p "Log out and try a different account? [y/N] " ans
   if [[ "$ans" =~ ^[Yy]$ ]]; then
     gh auth logout
-    gh auth login
+    gh auth login -s project
     WHO="$(gh api user --jq .login 2>/dev/null || true)"
   else
     echo "Cancelled. Ask a NaimorInc owner to grant '$WHO' read access to $REPO, or sign in with an account that has it."
