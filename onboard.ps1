@@ -6,6 +6,26 @@
 # hand off to the real installer there. Does NOT set up WSL2, install an
 # IDE, or install your dotfiles itself -- that's
 # naimor-dev-infra/bin/onboard.ps1, fetched below, not cloned.
+#
+# Runs on: native Windows 11, under Windows PowerShell 5.1 or PowerShell 7.
+#
+# Dry run: prints the plan and changes nothing.
+#   & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.ps1"))) -DryRun
+# or $env:NAIMOR_ONBOARD_DRY_RUN = '1' before the usual command: `| iex`
+# binds no parameters, so the param block below is inert there (the variable
+# then stays set in that window until removed). Installs become [dry-run]
+# lines and prompts are described, not asked. Read-only checks (Get-Command,
+# gh auth status, gh api reads) still run, so the plan is this machine's.
+# Where the next step needs something a real run would only just have
+# installed or logged in, the plan describes the rest and ends there. With
+# read access confirmed, it fetches the real installer and runs that
+# installer's own dry run. -DryRun is a switch, as in that installer; -WhatIf
+# is accepted as an alias.
+param(
+    [Alias('WhatIf')]
+    [switch] $DryRun
+)
+$script:DryRun = $DryRun -or ($env:NAIMOR_ONBOARD_DRY_RUN -in @('1', 'true', 'yes'))
 
 # Deliberately NOT $ErrorActionPreference = "Stop": under BOTH Windows
 # PowerShell 5.1 (the classic behavior, since v1) and PowerShell 7.4+
@@ -20,7 +40,18 @@ $PSNativeCommandUseErrorActionPreference = $false  # belt-and-suspenders on 7.4+
 $Org = "NaimorInc"
 $Repo = "naimor-dev-infra"
 
-function Info($m) { Write-Host "==> $m" }
+function Info($m, $Mark = '==>') { Write-Host "$Mark $m" }
+# A dry run's plan line.
+function Plan($m) { Info $m '[dry-run]' }
+# A dry run can't probe past a step that only a real run would complete (a
+# tool not yet installed, a login not yet made): it says what that step and
+# the rest would do, and stops. Exit 0: nothing failed.
+function Exit-Plan($Step, $Why) {
+    Plan $Step
+    Info "Dry run ends here: $Why Nothing was changed."
+    exit 0
+}
+if ($script:DryRun) { Info "DRY RUN: printing the plan; nothing on this machine is changed" }
 function Test-Cmd($name) { return [bool](Get-Command $name -ErrorAction SilentlyContinue) }
 function Refresh-Path {
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
@@ -43,6 +74,10 @@ if (-not (Test-Cmd winget)) {
 # checked by the caller: winget's "found in multiple sources" bail is a
 # nonzero exit, not a thrown error, so nothing catches it otherwise.
 function Winget-Install($Id) {
+    if ($script:DryRun) {
+        Plan "winget install --id $Id --exact --source winget --accept-package-agreements --accept-source-agreements"
+        return $true
+    }
     winget install --id $Id --exact --source winget `
         --accept-package-agreements --accept-source-agreements
     return ($LASTEXITCODE -eq 0)
@@ -68,6 +103,10 @@ if (-not (Test-Cmd gh)) {
 $missing = @()
 if (-not (Test-Cmd git)) { $missing += "git" }
 if (-not (Test-Cmd gh))  { $missing += "gh" }
+if ($missing.Count -gt 0 -and $script:DryRun) {
+    Exit-Plan "a real run then logs in to gh (gh auth login -s project), confirms read access to $Org/$Repo, and runs its installer" `
+        "$($missing -join ' and ') isn't installed yet, and the rest needs it."
+}
 if ($missing.Count -gt 0) {
     Write-Error @"
 $($missing -join ' and ') did not install. Most likely winget could not
@@ -83,6 +122,10 @@ then re-run this onboarding command.
 gh auth status *> $null
 if ($LASTEXITCODE -ne 0) {
     Info "Not logged in to gh."
+    if ($script:DryRun) {
+        Exit-Plan "gh auth login -s project (interactive: gh asks which account and how to sign in, usually in a browser)" `
+            "the access check and the installer's plan need a login. Log in, then run the dry run again."
+    }
     # -s project: day-to-day work edits an org Project board; the real installer
     # adds the scope to an older login that lacks it.
     gh auth login -s project
@@ -101,6 +144,10 @@ while ($true) {
     # Surface the real reason -- a SAML/SSO-unauthorized token and a genuine
     # no-access both land here but say different things in the API error.
     Write-Host ($probe | Select-Object -First 3 | Out-String).Trim()
+    if ($script:DryRun) {
+        Exit-Plan "a real run asks `"Log out and try a different account? [y/N]`": y logs out, runs gh auth login -s project and checks again; anything else stops" `
+            "nothing past this check can be planned until an account can read $Org/$Repo."
+    }
     $ans = Read-Host "Log out and try a different account? [y/N]"
     if ($ans -match '^[Yy]') {
         gh auth logout
@@ -119,4 +166,16 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($script -join ""))) {
     Write-Error "Could not fetch bin/onboard.ps1 from $Org/$Repo (empty or errored response). Re-run in a moment."
     exit 1
 }
-Invoke-Expression ($script -join "`n")
+if ($script:DryRun) {
+    # Fetching only reads. The installer runs as a script block so -DryRun
+    # binds (Invoke-Expression binds no parameters), and only once it is
+    # known to have one: an installer without it would change the machine.
+    if (-not (($script -join "`n") -match 'NAIMOR_ONBOARD_DRY_RUN')) {
+        Write-Error "The installer in $Org/$Repo has no dry run; not running it."
+        exit 1
+    }
+    Info "Running the installer's own dry run"
+    & ([scriptblock]::Create($script -join "`n")) -DryRun
+} else {
+    Invoke-Expression ($script -join "`n")
+}
