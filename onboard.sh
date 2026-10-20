@@ -3,30 +3,36 @@
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.sh)
 #
-# Runs on: macOS, Linux, WSL2 (bash 3.2+: macOS's /bin/bash).
+# Runs on: macOS, Debian/Ubuntu (apt), WSL2's Debian (bash 3.2+: macOS's
+# /bin/bash). git and gh are installed with Homebrew or apt; on another Linux,
+# install both first, or the gate below stops the run once apt fails.
 #
 # Job: get to an authenticated `gh` that can read naimor-dev-infra, then
 # hand off to the real installer there. Does NOT install your baseline
 # tools or dotfiles itself -- that's naimor-dev-infra/bin/onboard.sh,
-# fetched below, not cloned.
+# fetched below, not cloned. The design, and what the person running it
+# sees, is naimor-dev-infra's onboarding guide ("Setting up your
+# workstation").
 #
-# NOT plain `curl | bash`: this script calls `read -r -p` (the account-switch
-# prompt below), and piping curl's output into bash leaves stdin attached to
-# that pipe instead of the real terminal, so `read` would hang or read
-# garbage. `bash <(...)` uses process substitution instead -- bash reads the
-# script from a separate fd, stdin stays the terminal, `read` keeps working.
+# `bash <(curl ...)`, not plain `curl | bash`: under a pipe, bash's stdin is
+# the script itself, so whatever reads stdin gets the next script lines
+# instead of the person's keystrokes ([V] 2026-10-20, bash 5.2: `read` took
+# the line after it). `bash <(...)` reads the script from a separate fd and
+# leaves stdin on the terminal. The one prompt here reads /dev/tty anyway:
+# the Windows installer's WSL handoff does pipe this script into bash.
 # (PowerShell's `irm | iex` doesn't have this problem: `iex` evaluates in the
 # *same* session rather than a stdin-piped subshell, so its interactive
-# prompts are unaffected either way.)
+# prompts are unaffected either way; [V] 2026-10-20, pwsh 7.4.6.)
 #
 # --dry-run (or NAIMOR_ONBOARD_DRY_RUN=1) prints the plan and changes nothing:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/NaimorInc/.github/refs/heads/main/onboard.sh) --dry-run
-# Installs become [dry-run] lines and prompts are described, not asked.
-# Read-only checks (command -v, gh auth status, gh api reads) still run, so
-# the plan is this machine's. Where the next step needs something a real run
-# would only just have installed or logged in, the plan describes the rest
-# and ends there. With read access confirmed, it fetches the real installer
-# and runs that installer's own dry run.
+# Any value of the variable but 0, false or no counts, in any case: a mistyped
+# value plans rather than installs. Installs become [dry-run] lines and
+# prompts are described, not asked. Read-only checks (command -v, gh api
+# reads) still run, so the plan is this machine's. Where the next step needs
+# something a real run would only just have installed or logged in, the plan
+# describes the rest and ends there. With read access confirmed, it fetches
+# the real installer and runs that installer's own dry run.
 set -euo pipefail
 
 ORG="NaimorInc"
@@ -35,7 +41,10 @@ REPO="naimor-dev-infra"
 info() { printf '==> %s\n' "$1"; }
 
 DRY_RUN=0
-case "${NAIMOR_ONBOARD_DRY_RUN:-}" in 1|true|yes) DRY_RUN=1 ;; esac
+case "${NAIMOR_ONBOARD_DRY_RUN:-}" in
+  ''|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]) ;;
+  *) DRY_RUN=1 ;;
+esac
 for arg in "$@"; do
   case "$arg" in
     --dry-run|-n) DRY_RUN=1 ;;
@@ -92,7 +101,11 @@ ensure_brew() {
   eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)"
 }
 
-# 1. git
+# 1. git. On macOS without the Command Line Tools, /usr/bin/git is Apple's
+# shim, which only offers to install them: command -v finds it, so nothing is
+# installed here and the gate below passes. Tolerated: this script never runs
+# git, and the installer's Homebrew step installs the Command Line Tools ([S]
+# Homebrew's install.sh, read 2026-10-20).
 if ! command -v git >/dev/null 2>&1; then
   if [[ "$(uname)" == "Darwin" ]]; then
     ensure_brew
@@ -128,7 +141,7 @@ fi
 for tool in git gh; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     if [ "$DRY_RUN" = 1 ]; then
-      plan_ends "a real run then logs in to gh (gh auth login -s project), confirms read access to $ORG/$REPO, and runs its installer" \
+      plan_ends "a real run then logs in to gh if it isn't yet (gh auth login -s project), confirms read access to $ORG/$REPO, and runs its installer" \
         "$tool isn't installed yet, and the rest needs it."
     fi
     echo "ERROR: '$tool' did not install. Fix the error above and re-run." >&2
@@ -136,8 +149,13 @@ for tool in git gh; do
   fi
 done
 
-# 3. Authenticate
-if ! gh auth status >/dev/null 2>&1; then
+# 3. Authenticate. The probe is `gh api user`: it succeeds only with the
+# ACTIVE account's token, the one every call below uses. Not `gh auth status`:
+# without --active it exits 1 when ANY stored account on any host has a
+# problem ([S] gh 2.89.0's --help), so a good login next to a stale second
+# account would read as "not logged in", and a real run would then go
+# through `gh auth login`, which can switch the active account.
+if ! gh api user >/dev/null 2>&1; then
   info "Not logged in to gh."
   if [ "$DRY_RUN" = 1 ]; then
     plan_ends "gh auth login -s project (interactive: gh asks which account and how to sign in, usually in a browser)" \
@@ -164,7 +182,15 @@ while ! probe="$(gh api "repos/$ORG/$REPO" 2>&1)"; do
     plan_ends "a real run asks \"Log out and try a different account? [y/N]\": y logs out, runs gh auth login -s project and checks again; anything else stops" \
       "nothing past this check can be planned until an account can read $ORG/$REPO."
   fi
-  read -r -p "Log out and try a different account? [y/N] " ans
+  # From /dev/tty, not stdin: the Windows installer's WSL handoff pipes this
+  # script into bash, so stdin is the script (see the top). With no terminal,
+  # or at end of input, the answer is No.
+  if ( : </dev/tty ) 2>/dev/null; then
+    read -r -p "Log out and try a different account? [y/N] " ans </dev/tty || ans=""
+  else
+    echo "No terminal to ask on, so not switching accounts."
+    ans=""
+  fi
   if [[ "$ans" =~ ^[Yy]$ ]]; then
     gh auth logout
     gh auth login -s project
@@ -176,7 +202,9 @@ while ! probe="$(gh api "repos/$ORG/$REPO" 2>&1)"; do
 done
 info "Confirmed read access to $ORG/$REPO as '$WHO'."
 
-# 5. Hand off to the real installer. Fetched, not cloned.
+# 5. Hand off to the real installer. Fetched, not cloned. bash reads it on
+# stdin, so it must read every prompt from /dev/tty, as
+# naimor-dev-infra/bin/onboard.sh does.
 info "Fetching the real installer from $ORG/$REPO"
 if [ "$DRY_RUN" = 1 ]; then
   # Fetching only reads. The installer runs as its own dry run through the
