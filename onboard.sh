@@ -18,8 +18,9 @@
 # the script itself, so whatever reads stdin gets the next script lines
 # instead of the person's keystrokes ([V] 2026-10-20, bash 5.2: `read` took
 # the line after it). `bash <(...)` reads the script from a separate fd and
-# leaves stdin on the terminal. The one prompt here reads /dev/tty anyway:
-# the Windows installer's WSL handoff does pipe this script into bash.
+# leaves stdin on the terminal. The prompts here (gh's sign-in, and the
+# account question) read /dev/tty anyway: the Windows installer's WSL handoff
+# does pipe this script into bash.
 # (PowerShell's `irm | iex` doesn't have this problem: `iex` evaluates in the
 # *same* session rather than a stdin-piped subshell, so its interactive
 # prompts are unaffected either way; [V] 2026-10-20, pwsh 7.4.6.)
@@ -141,7 +142,7 @@ fi
 for tool in git gh; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     if [ "$DRY_RUN" = 1 ]; then
-      plan_ends "a real run then logs in to gh if it isn't yet (gh auth login -s project), confirms read access to $ORG/$REPO, and runs its installer" \
+      plan_ends "a real run then logs in to gh if it isn't yet (gh auth login -h github.com -s project), confirms read access to $ORG/$REPO, and runs its installer" \
         "$tool isn't installed yet, and the rest needs it."
     fi
     echo "ERROR: '$tool' did not install. Fix the error above and re-run." >&2
@@ -155,50 +156,118 @@ done
 # problem ([S] gh 2.89.0's --help), so a good login next to a stale second
 # account would read as "not logged in", and a real run would then go
 # through `gh auth login`, which can switch the active account.
+#
+# gh_login's stdin is /dev/tty when there is one: under the WSL handoff's
+# `curl | bash` gh's stdin would be this script, and gh would read the rest of
+# it as answers (the same pipe the header describes). -h github.com skips
+# gh's host question; -s project: day-to-day work edits an org Project board,
+# and the real installer adds the scope to an older login that lacks it.
+# A login adds an account beside the stored ones and makes it the active one;
+# it never logs another out. gh has kept several accounts per host since 2.40
+# ([S] gh 2.40.0's release notes; [V] 2026-10-22, gh 2.89.0's `auth switch
+# --help` describes switching among them). The step above installs gh from
+# GitHub's own channels, so it is current; a gh older than 2.40 that was
+# already installed would replace the account, which is unguarded.
+# A failed or cancelled sign-in is not fatal here: the caller's probe then
+# fails, and the banner below says what to do next.
+gh_login() {
+  if ( : </dev/tty ) 2>/dev/null; then
+    gh auth login -h github.com -s project </dev/tty || true
+  else
+    gh auth login -h github.com -s project || true
+  fi
+}
 if ! gh api user >/dev/null 2>&1; then
   info "Not logged in to gh."
   if [ "$DRY_RUN" = 1 ]; then
-    plan_ends "gh auth login -s project (interactive: gh asks which account and how to sign in, usually in a browser)" \
+    plan_ends "gh auth login -h github.com -s project (interactive: gh asks how to sign in, usually in a browser)" \
       "the access check and the installer's plan need a login. Log in, then run the dry run again."
   fi
-  # -s project: day-to-day work edits an org Project board; the real installer
-  # adds the scope to an older login that lacks it.
-  gh auth login -s project
+  gh_login
 fi
 
 # Name the account we're acting as. A person may have more than one GitHub
-# account with NaimorInc access (personal + work); make the pick visible.
+# account (work + personal); make the pick visible.
 WHO="$(gh api user --jq .login 2>/dev/null || true)"
 [ -n "$WHO" ] && info "Authenticated to GitHub as: $WHO"
 
+# Bold red for the banner below, only on a terminal and without NO_COLOR
+# (no-color.org). bash 3.2 has $'...'.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  LOUD=$'\033[1;31m'; BOLD=$'\033[1m'; PLAIN=$'\033[0m'
+else
+  LOUD=''; BOLD=''; PLAIN=''
+fi
+
+# Why the active account can't read $ORG/$REPO, made hard to scroll past:
+# people re-ran onboarding signed in to a personal account, saw the old
+# one-line "cannot read", and took it for a broken script. NaimorInc's
+# members are work accounts named Naimor- plus the person's initials, not
+# personal accounts. So a login without that prefix is almost certainly the
+# personal one, and the banner says so. A login with it gets the other
+# likely cause: access not granted yet. The prefix is a hint for a person,
+# never used to pick an account.
+# Requires: $1 the active login, empty if gh has none that works; $2 gh's
+# error output.
+explain_no_access() {
+  printf '\n%s  ==================================================================\n' "$LOUD"
+  printf '    STOP AND READ THIS: wrong GitHub account?\n'
+  printf '  ==================================================================%s\n\n' "$PLAIN"
+  case "$1" in
+    '')
+      printf '  gh has no working sign-in, so it cannot read %s/%s.\n' "$ORG" "$REPO" ;;
+    [Nn][Aa][Ii][Mm][Oo][Rr]-*)
+      printf '  gh is signed in as %s%s%s, which cannot read %s/%s.\n\n' "$BOLD" "$1" "$PLAIN" "$ORG" "$REPO"
+      printf '  It looks like a NaimorInc work account, so its access may not be\n'
+      printf '  set up yet. If it is yours, ask a NaimorInc owner to check it.\n'
+      printf '  If it is not, sign in with yours.\n' ;;
+    *)
+      printf '  gh is signed in as %s%s%s, which cannot read %s/%s.\n' "$BOLD" "$1" "$PLAIN" "$ORG" "$REPO"
+      printf '  That is probably your %sPERSONAL%s account.\n\n' "$BOLD" "$PLAIN"
+      printf '  NaimorInc uses WORK accounts, named %sNaimor-%s plus your initials\n' "$BOLD" "$PLAIN"
+      printf '  (Jane Doe would be Naimor-JD). Sign in with your Naimor- account.\n' ;;
+  esac
+  printf '\n  What GitHub said:\n'
+  printf '%s\n' "$2" | head -n 3 | sed 's/^/    /'
+  printf '\n'
+}
+
 # 4. Confirm read access to naimor-dev-infra -- not just org membership.
-# Offer to switch accounts rather than fail silently.
+# Offer another sign-in rather than fail silently.
 while ! probe="$(gh api "repos/$ORG/$REPO" 2>&1)"; do
-  echo "Account '$WHO' cannot read $ORG/$REPO."
-  # Surface the real reason -- a SAML/SSO-unauthorized token and a genuine
-  # no-access both land here but the API error text differs.
-  printf '%s\n' "$probe" | head -n 3
+  explain_no_access "$WHO" "$probe"
   if [ "$DRY_RUN" = 1 ]; then
-    plan_ends "a real run asks \"Log out and try a different account? [y/N]\": y logs out, runs gh auth login -s project and checks again; anything else stops" \
+    plan_ends "a real run asks \"Sign in with a different GitHub account now? Type y or n\" until it gets one: y runs gh auth login -h github.com -s project and checks again; n stops" \
       "nothing past this check can be planned until an account can read $ORG/$REPO."
   fi
   # From /dev/tty, not stdin: the Windows installer's WSL handoff pipes this
-  # script into bash, so stdin is the script (see the top). With no terminal,
-  # or at end of input, the answer is No.
+  # script into bash, so stdin is the script (see the top). No default: Enter
+  # alone asks again, so the answer is a choice made after reading the
+  # banner. With no terminal, or at end of input, the answer is No.
+  ans=""
   if ( : </dev/tty ) 2>/dev/null; then
-    read -r -p "Log out and try a different account? [y/N] " ans </dev/tty || ans=""
+    while :; do
+      printf '%sSign in with a different GitHub account now? Type y or n:%s ' "$BOLD" "$PLAIN"
+      read -r ans </dev/tty || { ans=n; echo; break; }
+      case "$ans" in [Yy]|[Yy][Ee][Ss]|[Nn]|[Nn][Oo]) break ;; esac
+    done
   else
-    echo "No terminal to ask on, so not switching accounts."
-    ans=""
+    echo "No terminal to ask on, so not signing in again."
   fi
-  if [[ "$ans" =~ ^[Yy]$ ]]; then
-    gh auth logout
-    gh auth login -s project
-    WHO="$(gh api user --jq .login 2>/dev/null || true)"
-  else
-    echo "Cancelled. Ask a NaimorInc owner to grant '$WHO' read access to $REPO, or sign in with an account that has it."
-    exit 1
-  fi
+  case "$ans" in
+    [Yy]*)
+      printf '\n  %sBefore you enter the code gh shows, make sure the browser is signed in\n' "$BOLD"
+      printf '  to GitHub as your Naimor- account%s: GitHub authorizes whichever account\n' "$PLAIN"
+      printf '  the browser is signed in to, so a personal one there gets this same\n'
+      printf '  message again. Your other login stays in gh; only the active one changes.\n\n'
+      gh_login
+      WHO="$(gh api user --jq .login 2>/dev/null || true)"
+      [ -n "$WHO" ] && info "Authenticated to GitHub as: $WHO"
+      ;;
+    *)
+      echo "Stopped. Sign in with your Naimor- work account (gh auth login -h github.com -s project), then run this command again. No work account yet? Ask a NaimorInc owner."
+      exit 1 ;;
+  esac
 done
 info "Confirmed read access to $ORG/$REPO as '$WHO'."
 
