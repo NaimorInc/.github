@@ -124,7 +124,7 @@ $missing = @()
 if (-not (Test-Cmd git)) { $missing += "git" }
 if (-not (Test-Cmd gh))  { $missing += "gh" }
 if ($missing.Count -gt 0 -and $script:DryRun) {
-    Exit-Plan "a real run then logs in to gh if it isn't yet (gh auth login -s project), confirms read access to $Org/$Repo, and runs its installer" `
+    Exit-Plan "a real run then logs in to gh if it isn't yet (gh auth login -h github.com -s project), confirms read access to $Org/$Repo, and runs its installer" `
         "the rest needs $($missing -join ' and '), not installed yet."
     return
 }
@@ -147,44 +147,107 @@ then re-run this onboarding command.
 # gh 2.89.0's --help), so a good login next to a stale second account would
 # read as "not logged in", and a real run would then go through
 # `gh auth login`, which can switch the active account.
+#
+# The login: -h github.com skips gh's host question; -s project: day-to-day
+# work edits an org Project board, and the real installer adds the scope to
+# an older login that lacks it. A login adds an account beside the stored
+# ones and makes it the active one; it never logs another out. gh has kept
+# several accounts per host since 2.40 ([S] gh 2.40.0's release notes; [V]
+# 2026-10-22, gh 2.89.0's `auth switch --help` describes switching among
+# them). winget installs a current gh; one older than 2.40 that was already
+# installed would replace the account, which is unguarded. A failed or
+# cancelled sign-in is left to the probe that follows it: $LASTEXITCODE is
+# not read, the probe fails, and the banner below says what to do next.
 gh api user *> $null
 if ($LASTEXITCODE -ne 0) {
     Info "Not logged in to gh."
     if ($script:DryRun) {
-        Exit-Plan "gh auth login -s project (interactive: gh asks which account and how to sign in, usually in a browser)" `
+        Exit-Plan "gh auth login -h github.com -s project (interactive: gh asks how to sign in, usually in a browser)" `
             "the access check and the installer's plan need a login. Log in, then run the dry run again."
         return
     }
-    # -s project: day-to-day work edits an org Project board; the real installer
-    # adds the scope to an older login that lacks it.
-    gh auth login -s project
+    gh auth login -h github.com -s project
 }
 
 # Name the account we're about to act as. A person may have more than one
-# GitHub account with NaimorInc access (e.g. a personal and a work login);
-# make it visible which one onboarding picked up rather than assuming.
+# GitHub account (work + personal); make the pick visible.
 $who = (gh api user --jq .login 2>$null)
 if ($who) { Info "Authenticated to GitHub as: $who" }
+
+# Why the active account can't read $Org/$Repo, made hard to scroll past:
+# people re-ran onboarding signed in to a personal account, saw the old
+# one-line "cannot read", and took it for a broken script. NaimorInc's
+# members are work accounts named Naimor- plus the person's initials, not
+# personal accounts. So a login without that prefix is almost certainly the
+# personal one, and the banner says so. A login with it gets the other
+# likely cause: access not granted yet. The prefix is a hint for a person,
+# never used to pick an account.
+# -match is case-insensitive, as GitHub logins are. onboard.sh prints the
+# same text.
+function Show-NoAccess([string] $Login, $GhError) {
+    $rule = '  ' + ('=' * 66)
+    Write-Host ''
+    Write-Host $rule -ForegroundColor Red
+    Write-Host '    STOP AND READ THIS: wrong GitHub account?' -ForegroundColor Red
+    Write-Host $rule -ForegroundColor Red
+    Write-Host ''
+    if (-not $Login) {
+        Write-Host "  gh has no working sign-in, so it cannot read $Org/$Repo."
+    } elseif ($Login -match '^Naimor-') {
+        Write-Host "  gh is signed in as $Login, which cannot read $Org/$Repo." -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host '  It looks like a NaimorInc work account, so its access may not be'
+        Write-Host '  set up yet. If it is yours, ask a NaimorInc owner to check it.'
+        Write-Host '  If it is not, sign in with yours.'
+    } else {
+        Write-Host "  gh is signed in as $Login, which cannot read $Org/$Repo." -ForegroundColor Yellow
+        Write-Host '  That is probably your PERSONAL account.' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host '  NaimorInc uses WORK accounts, named Naimor- plus your initials'
+        Write-Host '  (Jane Doe would be Naimor-JD). Sign in with your Naimor- account.'
+    }
+    Write-Host ''
+    Write-Host '  What GitHub said:'
+    # Surface the real reason -- a SAML/SSO-unauthorized token and a genuine
+    # no-access both land here but say different things in the API error.
+    $GhError | Select-Object -First 3 | ForEach-Object { Write-Host "    $_" }
+    Write-Host ''
+}
+
+# The device flow authorizes whichever account the browser is signed in to,
+# so a browser still on the personal account signs that one in again.
+function Show-BrowserHint {
+    Write-Host ''
+    Write-Host '  Before you enter the code gh shows, make sure the browser is signed in' -ForegroundColor Yellow
+    Write-Host '  to GitHub as your Naimor- account: GitHub authorizes whichever account' -ForegroundColor Yellow
+    Write-Host '  the browser is signed in to, so a personal one there gets this same'
+    Write-Host '  message again. Your other login stays in gh; only the active one changes.'
+    Write-Host ''
+}
 
 while ($true) {
     $probe = gh api "repos/$Org/$Repo" 2>&1
     if ($LASTEXITCODE -eq 0) { break }
-    Write-Host "Account '$who' cannot read $Org/$Repo."
-    # Surface the real reason -- a SAML/SSO-unauthorized token and a genuine
-    # no-access both land here but say different things in the API error.
-    Write-Host ($probe | Select-Object -First 3 | Out-String).Trim()
+    Show-NoAccess $who $probe
     if ($script:DryRun) {
-        Exit-Plan "a real run asks `"Log out and try a different account? [y/N]`": y logs out, runs gh auth login -s project and checks again; anything else stops" `
+        Exit-Plan "a real run asks `"Sign in with a different GitHub account now? Type y or n`" until it gets one: y runs gh auth login -h github.com -s project and checks again; n stops" `
             "nothing past this check can be planned until an account can read $Org/$Repo."
         return
     }
-    $ans = Read-Host "Log out and try a different account? [y/N]"
-    if ($ans -match '^[Yy]') {
-        gh auth logout
-        gh auth login -s project
+    # No default: Enter alone asks again, so the answer is a choice made after
+    # reading the banner. Read-Host returns $null at end of input (a
+    # non-interactive host), which is No.
+    do {
+        $ans = Read-Host "Sign in with a different GitHub account now? Type y or n"
+        if ($null -eq $ans) { $ans = 'n' }
+    } until ($ans -match '^(y|yes|n|no)$')
+    if ($ans -match '^y') {
+        Show-BrowserHint
+        gh auth login -h github.com -s project
         $who = (gh api user --jq .login 2>$null)
+        if ($who) { Info "Authenticated to GitHub as: $who" }
     } else {
-        Write-Error "Cancelled. Ask a NaimorInc owner to grant '$who' read access to $Repo, or sign in with an account that has it."
+        Write-Error "Stopped. Sign in with your Naimor- work account (gh auth login -h github.com -s project), then run this command again. No work account yet? Ask a NaimorInc owner."
         $global:LASTEXITCODE = 1
         return
     }
